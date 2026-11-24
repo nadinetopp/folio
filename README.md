@@ -197,6 +197,11 @@ Ask AI is optional and desktop-only. See [Using Ask AI](#using-ask-ai) for setup
 - **Save a copy** (`Ctrl+S`) exports a PDF with page annotations, including highlights and attached notes, drawings,
   text boxes, and visual signatures. Your original file is not overwritten. Whole-document notes and AI chat history
   stay in Folio; copy notes as Markdown when you want to share them.
+- **Export as CSV** from **More → Export as CSV…**, or from the selection toolbar for just the selected area. Folio
+  lines the text up into rows and columns so an invoice, rate notice, or ledger can be edited in a spreadsheet.
+  Numbers and currency stay as written, and a table that continues on the next page keeps a repeated header only once.
+  The file is UTF-8, with an Excel-friendly option (a byte-order mark) on by default. A scanned page has no text until
+  you choose **Recognize text**; exporting does not start recognition.
 - **Print** (`Ctrl+P`, or `⌘P` on macOS) previews each page at its own proportions and prints the annotated PDF. On desktop, choose **Advanced** for [poster, booklet, or multiple pages per sheet](docs/printing.md).
 - **Document info** shows available metadata: filename, title, author, subject, page count and size, file size,
   creation/modification dates, generating application, producer, and PDF version.

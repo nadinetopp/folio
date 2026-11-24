@@ -85,16 +85,18 @@ interface PopoverProps {
   /** Highlights the selection in a color, with the note typed so far (may be empty). */
   onHighlight: (hex: string, note: string) => void;
   onAsk: () => void;
+  /** Write the selected area to a CSV file. */
+  onExportCsv: () => void;
   /** The note field took focus (which clears the page selection): keep the popover open. */
   onPin: () => void;
   onDismiss: () => void;
 }
 
 /** Shown as soon as text is selected: one-click colors, plus a note field that's ready to type in. */
-export function SelectionPopover({ info, stageWidth, colors, current, onHighlight, onAsk, onPin, onDismiss }: PopoverProps) {
+export function SelectionPopover({ info, stageWidth, colors, current, onHighlight, onAsk, onExportCsv, onPin, onDismiss }: PopoverProps) {
   const [copy, setCopy] = useState<"idle" | "done" | "failed">("idle");
   const [note, setNote] = useState("");
-  const width = 30 * colors.length + 210;
+  const width = 30 * colors.length + 258;
   return (
     <div
       className="selection-popover"
@@ -130,6 +132,9 @@ export function SelectionPopover({ info, stageWidth, colors, current, onHighligh
           }}
         >
           <Icon name={copy === "done" ? "check" : copy === "failed" ? "close" : "copy"} size={15} />
+        </button>
+        <button className="pop-btn icon-only" title="Export as CSV" aria-label="Export as CSV" onClick={onExportCsv}>
+          <Icon name="table" size={15} />
         </button>
       </div>
       <input

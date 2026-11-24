@@ -45,6 +45,9 @@ import { saveVersion, type PdfChange } from "./versionHistory";
 import { SettingsDialog } from "./SettingsDialog";
 import { ChangelogDialog } from "./ChangelogDialog";
 import { PrintDialog } from "./PrintDialog";
+import { CsvExportDialog } from "./CsvExportDialog";
+import { exportPdfToCsv } from "./lib/csv/exportDocument";
+import type { Box } from "./lib/csv/types";
 import type { Release } from "./releaseNotes";
 import { detectSignatureTargets, placeSignature, type SignatureTarget } from "./signatures";
 import { keepDrawingPointer } from "./drawing";
@@ -146,6 +149,37 @@ function saveBlob(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+function csvBaseName(name: string) {
+  return name.replace(/\.pdf$/i, "") || "document";
+}
+
+function blankCsvMessage(pages: number[]) {
+  const list = pages.length === 1 ? `page ${pages[0]}` : `pages ${pages.join(", ")}`;
+  return `Exported CSV. No text on ${list}. For a scan, choose Recognize text.`;
+}
+
+/** Selection rectangles in PDF user space, padded so a glyph on the edge is not clipped. */
+function selectionPdfRects(info: SelectionInfo, viewer: PDFViewer): Box[] | null {
+  const node = info.range.startContainer;
+  const element = node instanceof Element ? node : node.parentElement;
+  const layer = element?.closest(".textLayer") as HTMLElement | null;
+  if (!layer) return null;
+  const page = Number((layer.closest(".page") as HTMLElement | null)?.dataset.pageNumber) || info.page;
+  const viewport = (viewer.getPageView(page - 1) as { viewport?: { width: number; height: number; convertToPdfPoint(x: number, y: number): number[] } } | undefined)?.viewport;
+  if (!viewport) return null;
+  const origin = layer.getBoundingClientRect();
+  if (origin.width < 1 || origin.height < 1) return null;
+  const sx = viewport.width / origin.width;
+  const sy = viewport.height / origin.height;
+  const rects = [...info.range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
+  if (!rects.length) return null;
+  return rects.map(rect => {
+    const [x1, y1] = viewport.convertToPdfPoint((rect.left - origin.left) * sx, (rect.top - origin.top) * sy);
+    const [x2, y2] = viewport.convertToPdfPoint((rect.right - origin.left) * sx, (rect.bottom - origin.top) * sy);
+    return [Math.min(x1, x2) - 1.5, Math.min(y1, y2) - 1.5, Math.max(x1, x2) + 1.5, Math.max(y1, y2) + 1.5];
+  });
+}
+
 export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs; tabKey: number; upgradeNotes: Release[] }) {
   const headerRef = useRef<HTMLElement>(null);
   const active = useSyncExternalStore(tabs.subscribe, () => tabs.active === tabKey);
@@ -244,8 +278,10 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
   const [printCopy, setPrintCopy] = useState<{ pdf: PDFDocumentProxy; bytes: Uint8Array; page: number; name: string } | null>(null);
   const preparingPrint = useRef(false);
   useEffect(() => () => { if (printCopy) void printCopy.pdf.loadingTask.destroy(); }, [printCopy]);
-  const [dialog, setDialog] = useState<"info" | "shortcuts" | "about" | "url" | "settings" | "ai-settings" | "changelog" | "upgrade" | null>(
+  const [dialog, setDialog] = useState<"info" | "shortcuts" | "about" | "url" | "settings" | "ai-settings" | "changelog" | "upgrade" | "csv" | null>(
     upgradeNotes.length ? "upgrade" : null);
+  const [csvBusy, setCsvBusy] = useState(false);
+  const csvFlight = useRef(false);
   // A pasted or dropped link waits in Open from URL, so the user sees where it goes before Folio contacts it.
   const [linkDraft, setLinkDraft] = useState("");
   const openUrlDialog = (link = "") => { setLinkDraft(link); setDialog("url"); };
@@ -1010,6 +1046,60 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
     }
   };
 
+  const saveCsv = (csv: string, name: string, blankPages: number[]) => {
+    saveBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), name);
+    flash(blankPages.length ? blankCsvMessage(blankPages) : "Exported CSV", blankPages.length ? 4500 : undefined);
+  };
+
+  const exportCsv = async (scope: "page" | "all", bom: boolean) => {
+    const current = docRef.current;
+    if (!current || csvFlight.current) return;
+    setCsvBusy(true);
+    csvFlight.current = true;
+    try {
+      const pages = scope === "page" ? [pageRef.current] : Array.from({ length: current.pdf.numPages }, (_, index) => index + 1);
+      const result = await exportPdfToCsv(current.pdf, { pages, bom });
+      if (docRef.current !== current) return;
+      if (!result.csv) {
+        flash("No text to export. For a scan, choose Recognize text first.", 4500);
+        return;
+      }
+      const base = csvBaseName(current.name);
+      saveCsv(result.csv, scope === "page" ? `${base} (page ${pageRef.current}).csv` : `${base}.csv`, result.blankPages);
+      setDialog(null);
+    } catch {
+      if (docRef.current === current) flash("Couldn't export this CSV.");
+    } finally {
+      csvFlight.current = false;
+      setCsvBusy(false);
+    }
+  };
+
+  const exportSelectionCsv = async (info: SelectionInfo) => {
+    const current = docRef.current;
+    const viewer = viewerRef.current;
+    if (!current || !viewer || csvFlight.current) return;
+    const rects = selectionPdfRects(info, viewer);
+    if (!rects) { flash("Couldn't export that selection."); return; }
+    setCsvBusy(true);
+    csvFlight.current = true;
+    try {
+      // The selection is already text on the page. Recognition is not started from here.
+      const result = await exportPdfToCsv(current.pdf, { pages: [info.page], region: { page: info.page, rects }, bom: true });
+      if (docRef.current !== current) return;
+      if (!result.csv) {
+        flash("No text to export. For a scan, choose Recognize text first.", 4500);
+        return;
+      }
+      saveCsv(result.csv, `${csvBaseName(current.name)} (selection).csv`, []);
+    } catch {
+      if (docRef.current === current) flash("Couldn't export this CSV.");
+    } finally {
+      csvFlight.current = false;
+      setCsvBusy(false);
+    }
+  };
+
   const download = async () => {
     if (contentRef.current && !(await contentRef.current.finish())) return;
     const doc = docRef.current;
@@ -1474,6 +1564,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
                     { kind: "action", icon: "close", label: "Close document", shortcut: keys("Ctrl W"), onSelect: () => void tabs.close(tabKey) },
                     { kind: "divider" },
                     { kind: "action", icon: "download", label: "Save a copy", shortcut: keys("Ctrl S"), onSelect: download },
+                    { kind: "action", icon: "table", label: "Export as CSV…", onSelect: () => setDialog("csv") },
                     { kind: "action", icon: "history", label: "Version history", onSelect: () => { setAiOpen(false); setHistoryOpen(true); } },
                     { kind: "action", icon: "print", label: "Print", shortcut: keys("Ctrl P"), onSelect: print },
                     { kind: "action", icon: "info", label: "Document info", onSelect: () => setDialog("info") },
@@ -1643,6 +1734,7 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
               current={highlightColor}
               onHighlight={(hex, note) => void quickHighlight(hex, note)}
               onAsk={() => { setPinned(null); askAbout(selection.text, selection.page); }}
+              onExportCsv={() => void exportSelectionCsv(selection)}
               onPin={() => setPinned(selection)}
               onDismiss={dismissSelection}
             />
@@ -1740,6 +1832,8 @@ export default function App({ tabs, tabKey, upgradeNotes }: { tabs: DocumentTabs
         />
       )}
       {dialog === "info" && doc && <InfoDialog key={doc.pdf.loadingTask.docId} pdf={doc.pdf} name={doc.name} size={doc.size} onClose={() => setDialog(null)} />}
+      {dialog === "csv" && doc && <CsvExportDialog busy={csvBusy} onClose={() => { if (!csvBusy) setDialog(null); }}
+        onExport={(scope, bom) => void exportCsv(scope, bom)} />}
       {printCopy && <PrintDialog pdf={printCopy.pdf} currentPage={printCopy.page} name={printCopy.name}
         onPrint={() => { printPdfBytes(printCopy.bytes); setPrintCopy(null); }} onClose={() => setPrintCopy(null)} />}
       {dialog === "shortcuts" && <ShortcutsDialog onClose={() => setDialog(null)} />}
